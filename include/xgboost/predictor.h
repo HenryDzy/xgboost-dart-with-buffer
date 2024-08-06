@@ -32,8 +32,26 @@ struct PredictionCacheEntry {
   HostDeviceVector<bst_float> predictions;
   // The version of current cache, corresponding number of layers of trees
   std::uint32_t version{0};
-
+  // 
+  bool valid = false;
   PredictionCacheEntry() = default;
+  PredictionCacheEntry& operator=(const PredictionCacheEntry& other) {
+    if (this != &other) {
+      predictions = other.predictions;
+      version = other.version;
+    }
+    return *this;
+  };
+  
+  PredictionCacheEntry(const PredictionCacheEntry& other) {
+    predictions = other.predictions;
+    version = other.version;
+  }; 
+
+  PredictionCacheEntry(PredictionCacheEntry&&) = delete;
+
+  PredictionCacheEntry& operator=(PredictionCacheEntry&&) = delete; 
+
   /**
    * \brief Update the cache entry by number of versions.
    *
