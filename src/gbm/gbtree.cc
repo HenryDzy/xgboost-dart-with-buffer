@@ -1,5 +1,5 @@
 /**
- * Copyright 2014-2023 by Contributors
+ * Copyright 2014-2024, XGBoost Contributors
  * \file gbtree.cc
  * \brief gradient boosted tree implementation.
  * \author Tianqi Chen
@@ -10,8 +10,7 @@
 #include <dmlc/parameter.h>
 
 #include <algorithm>  // for equal
-#include <cinttypes>  // for uint32_t
-#include <limits>
+#include <cstdint>    // for uint32_t
 #include <memory>
 #include <string>
 #include <utility>
@@ -20,6 +19,7 @@
 #include <unistd.h>
 
 #include "../common/common.h"
+#include "../common/cuda_rt_utils.h"  // for AllVisibleGPUs
 #include "../common/error_msg.h"  // for UnknownDevice, WarnOldSerialization, InplacePredictProxy
 #include "../common/random.h"
 #include "../common/threading_utils.h"
@@ -349,7 +349,7 @@ void GBTree::LoadConfig(Json const& in) {
   // This would cause all trees to be pushed to trees_to_update
   // e.g. updating a model, then saving and loading it would result in an empty model
   tparam_.process_type = TreeProcessType::kDefault;
-  std::int32_t const n_gpus = xgboost::common::AllVisibleGPUs();
+  std::int32_t const n_gpus = common::AllVisibleGPUs();
 
   auto msg = StringView{
       R"(
@@ -751,6 +751,7 @@ class Dart : public GBTree {
     predictor->InitOutPredictions(p_fmat->Info(), &p_out_preds->predictions,
                                   model_);
     p_out_preds->version = 0;
+    PredictionCacheEntry predts_nobuffer = *p_out_preds;
     auto [tree_begin, tree_end] = detail::LayerToTree(model_, layer_begin, layer_end);
     auto n_groups = model_.learner_model_param->num_output_group;
 
@@ -763,59 +764,60 @@ class Dart : public GBTree {
     auto layer_trees = [&]() {
       return model_.param.num_parallel_tree * model_.learner_model_param->OutputLength();
     };
+
     // Get the process ID
     pid_t pid = getpid();
     if (dart_prediction_buffer_.find(pid) == dart_prediction_buffer_.end()) {
       dart_prediction_buffer_.insert(make_pair(pid, std::vector<PredictionCacheEntry>()));
     }
     dart_prediction_buffer_[pid].resize(tree_end);
+    
     std::cout << "tree_end: " << tree_end << std::endl;
     bool restored = false;
     auto beforeTime = std::chrono::steady_clock::now();
+    bst_tree_t restore = tree_end;
     for (bst_tree_t i = tree_begin; i < tree_end; i += 1) {
       if (training && std::binary_search(idx_drop_.cbegin(), idx_drop_.cend(), i)) {
         continue;
       }
+
       // if index is lower than min(min_drop_idx, dart_prediction_buffer_.size())
       // reuse the prediction from the buffer       
-      if (use_buffer) {
-        if (!restored){
-          bst_tree_t max_restored_index = std::min(min_drop_idx, 
-                        static_cast<int>(dart_prediction_buffer_[pid].size())) - 1;
-          std::cout << "pid: " << pid << std::endl;
-          if (max_restored_index >= 0) {
-            std::cout << "max_restored_index: " << max_restored_index << std::endl;
-            i = max_restored_index;
-            PredictionCacheEntry predts_temp = dart_prediction_buffer_[pid][i];
-            if (predts_temp.valid) {
-              std::cout << "buffer is valid: " << i << std::endl;
-              predts = predts_temp;
-            }
-            restored = true;
+      if (use_buffer && !restored) {
+        bst_tree_t max_restored_index = std::min(min_drop_idx, 
+                      static_cast<int>(dart_prediction_buffer_[pid].size())) - 1;
+        if (max_restored_index >= 0) {
+          std::cout << "max_restored_index: " << max_restored_index << std::endl;
+          restored = true;
+          restore = max_restored_index;
+          i = restore;
+          PredictionCacheEntry predts_temp = dart_prediction_buffer_[pid][i];
+          if (true) {
+            std::cout << "buffer is valid: " << i << std::endl;
+            *p_out_preds = predts_temp;
             continue;
           }
-          else if (max_restored_index == -2) {
-            if (tree_end == 0) {
-              predts.predictions.Fill(0);
-              restored = true;
-              continue;
-            }
-            i = std::max(tree_end-1, static_cast<bst_tree_t>(0));
-            std::cout << "restore the final result of the last iteration: " << i << std::endl;
-            PredictionCacheEntry predts_temp = dart_prediction_buffer_[pid][i];
-            if (predts_temp.valid) {
-              std::cout << "buffer is valid: " << i << std::endl;
-              predts = predts_temp;
-            }
-            restored = true;
+        } else if (max_restored_index == -2) {
+          restored = true;
+          if (tree_end == 0) {
             continue;
           }
+          restore = std::max(tree_end-1, static_cast<bst_tree_t>(0));
+          i = restore;
+          std::cout << "restore the final result of the last iteration: " << i << std::endl;
+          PredictionCacheEntry predts_temp = dart_prediction_buffer_[pid][i];
+          if (true) {
+            std::cout << "buffer is valid: " << i << std::endl;
+            *p_out_preds = predts_temp;
+            continue;
+          }
+        } else {
+          restored = true;
         }
       }
-      else {
-        predts.predictions.Fill(0);
-      }
-      CHECK_GE(i, p_out_preds->version);
+      
+      // CHECK_GE(i, p_out_preds->version);
+      predts.predictions.Fill(0);
       auto version = i / layer_trees();
       p_out_preds->version = version;
       predts.version = version;
@@ -832,6 +834,7 @@ class Dart : public GBTree {
                           predts.predictions.DeviceSpan(), w, n_rows, n_groups,
                           group);
         if (!use_buffer){
+          // std::cout << "store the prediction to buffer: " << i << std::endl;
           dart_prediction_buffer_[pid][i] = *p_out_preds;
           dart_prediction_buffer_[pid][i].valid = true;
         }
@@ -843,6 +846,7 @@ class Dart : public GBTree {
           h_out_predts[offset] += (h_predts[offset] * w);
         });
         if (!use_buffer){
+          // std::cout << "store the prediction to buffer: " << i << std::endl;
           dart_prediction_buffer_[pid][i] = *p_out_preds;
           dart_prediction_buffer_[pid][i].valid = true;
         }
@@ -851,7 +855,47 @@ class Dart : public GBTree {
     auto afterTime = std::chrono::steady_clock::now();
     double duration_second = std::chrono::duration<double>(afterTime - beforeTime).count();
     std::cout << "for-loop takes: " << duration_second << " s" << std::endl;
+
+    
+    // for (bst_tree_t i = tree_begin; i < tree_end; i += 1) {
+    //   if (training && std::binary_search(idx_drop_.cbegin(), idx_drop_.cend(), i)) {
+    //     continue;
+    //   }
+    //   // CHECK_GE(i, p_out_preds->version);
+    //   auto version = i / layer_trees();
+    //   predts.predictions.Fill(0);
+    //   predts_nobuffer.version = version;
+    //   predts.version = version;
+    //   predictor->PredictBatch(p_fmat, &predts, model_, i, i + 1);
+    //   // Multiple the weight to output prediction.
+    //   auto w = this->weight_drop_.at(i);
+    //   auto group = model_.tree_info.at(i);
+    //   CHECK_EQ(predts_nobuffer.predictions.Size(), predts.predictions.Size());
+
+    //   size_t n_rows = p_fmat->Info().num_row_;
+    //   if (predts.predictions.Device().IsCUDA()) {
+    //     predts_nobuffer.predictions.SetDevice(predts.predictions.Device());
+    //     GPUDartPredictInc(predts_nobuffer.predictions.DeviceSpan(),
+    //                       predts.predictions.DeviceSpan(), w, n_rows, n_groups,
+    //                       group);
+    //   } else {
+    //     auto &h_out_predts = predts_nobuffer.predictions.HostVector();
+    //     auto &h_predts = predts.predictions.HostVector();
+    //     common::ParallelFor(p_fmat->Info().num_row_, ctx_->Threads(), [&](auto ridx) {
+    //       const size_t offset = ridx * n_groups + group;
+    //       h_out_predts[offset] += (h_predts[offset] * w);
+    //     });
+    //   }
+    // }
+    // bool equal = true;
+    // if (use_buffer) {
+    //   auto predts_vec = p_out_preds->predictions.HostVector();
+    //   auto predts_nobuffer_vec = predts_nobuffer.predictions.HostVector();
+    //   equal = (predts_vec == predts_nobuffer_vec);
+    //   std::cout << "predts vs predts_nobuffer: " << equal << std::endl;
+    // }
   }
+
 
   void PredictBatch(DMatrix* p_fmat, PredictionCacheEntry* p_out_preds, bool training,
                     bst_layer_t layer_begin, bst_layer_t layer_end) override {
@@ -998,7 +1042,6 @@ class Dart : public GBTree {
     std::uniform_real_distribution<> runif(0.0, 1.0);
     auto& rnd = common::GlobalRandom();
     bool skip = false;
-    // int max_drop = 10;
     if (dparam_.skip_drop > 0.0) skip = (runif(rnd) < dparam_.skip_drop);
     // sample some trees to drop
     if (!skip) {
@@ -1024,16 +1067,9 @@ class Dart : public GBTree {
           idx_drop_.push_back(i);
         }
       } else {
-        // auto drop_rate = std::min(static_cast<double>(dparam_.rate_drop), max_drop / static_cast<double>(weight_drop_.size()));
         for (size_t i = 0; i < weight_drop_.size(); ++i) {
-          // if (i <= (weight_drop_.size() - weight_drop_.size() % 10)) {
-          //   continue;
-          // }
           if (runif(rnd) < dparam_.rate_drop) {
             idx_drop_.push_back(i);
-            // if (idx_drop_.size() >= static_cast<size_t>(max_drop)) {
-            //   break;
-            // }
           }
         }
         if (dparam_.one_drop && idx_drop_.empty() && !weight_drop_.empty()) {

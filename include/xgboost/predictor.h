@@ -39,6 +39,7 @@ struct PredictionCacheEntry {
     if (this != &other) {
       predictions = other.predictions;
       version = other.version;
+      valid = other.valid;
     }
     return *this;
   };
@@ -46,6 +47,7 @@ struct PredictionCacheEntry {
   PredictionCacheEntry(const PredictionCacheEntry& other) {
     predictions = other.predictions;
     version = other.version;
+    valid = other.valid;
   }; 
 
   PredictionCacheEntry(PredictionCacheEntry&&) = delete;

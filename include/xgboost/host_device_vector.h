@@ -93,10 +93,10 @@ class HostDeviceVector {
   explicit HostDeviceVector(const std::vector<T>& init, DeviceOrd device = DeviceOrd::CPU());
   ~HostDeviceVector();
 
-  HostDeviceVector(const HostDeviceVector<T>&) = delete;
+  HostDeviceVector(const HostDeviceVector<T>&);
   HostDeviceVector(HostDeviceVector<T>&&);
 
-  HostDeviceVector<T>& operator=(const HostDeviceVector<T>&) = delete;
+  HostDeviceVector<T>& operator=(const HostDeviceVector<T>&);
   HostDeviceVector<T>& operator=(HostDeviceVector<T>&&);
 
   [[nodiscard]] bool Empty() const { return Size() == 0; }

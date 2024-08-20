@@ -20,7 +20,6 @@ struct HostDeviceVectorImpl {
   explicit HostDeviceVectorImpl(size_t size, T v) : data_h_(size, v) {}
   HostDeviceVectorImpl(std::initializer_list<T> init) : data_h_(init) {}
   explicit HostDeviceVectorImpl(std::vector<T>  init) : data_h_(std::move(init)) {}
-  HostDeviceVectorImpl(const HostDeviceVectorImpl& that) : data_h_(that.data_h_) {}
   HostDeviceVectorImpl(HostDeviceVectorImpl&& that) : data_h_(std::move(that.data_h_)) {}
 
   void Swap(HostDeviceVectorImpl &other) {
@@ -130,6 +129,11 @@ void HostDeviceVector<T>::Resize(size_t new_size, T v) {
 }
 
 template <typename T>
+void HostDeviceVector<T>::Resize(size_t new_size) {
+  impl_->Vec().resize(new_size, T{});
+}
+
+template <typename T>
 void HostDeviceVector<T>::Fill(T v) {
   std::fill(HostVector().begin(), HostVector().end(), v);
 }
@@ -185,8 +189,6 @@ void HostDeviceVector<T>::SetDevice(DeviceOrd) const {}
 
 // explicit instantiations are required, as HostDeviceVector isn't header-only
 template class HostDeviceVector<bst_float>;
-template class HostDeviceVector<float>;
-template class HostDeviceVector<int>;
 template class HostDeviceVector<double>;
 template class HostDeviceVector<GradientPair>;
 template class HostDeviceVector<GradientPairPrecise>;

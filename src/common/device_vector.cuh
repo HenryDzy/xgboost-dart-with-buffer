@@ -307,8 +307,9 @@ class DeviceUVector {
 
  public:
   DeviceUVector() = default;
-  DeviceUVector(DeviceUVector const &that) = delete;
-  DeviceUVector &operator=(DeviceUVector const &that) = delete;
+  DeviceUVector(DeviceUVector const &that) = default;
+  DeviceUVector &operator=(DeviceUVector const &that) = default;
+  
   DeviceUVector(DeviceUVector &&that) = default;
   DeviceUVector &operator=(DeviceUVector &&that) = default;
 
